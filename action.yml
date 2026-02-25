@@ -1,0 +1,152 @@
+name: "GitOps YAML Tag Update"
+description: "Update a YAML key in a remote repository using GitHub App authentication (Enterprise compatible)"
+author: "Your Name"
+
+branding:
+  icon: "git-commit"
+  color: "blue"
+
+inputs:
+  app_id:
+    description: "GitHub App ID"
+    required: true
+  installation_id:
+    description: "GitHub App Installation ID"
+    required: true
+  private_key:
+    description: "GitHub App Private Key (PEM content)"
+    required: true
+  repository:
+    description: "Target repository (org/repo)"
+    required: true
+  branch:
+    description: "Target branch"
+    required: false
+    default: "main"
+  file_path:
+    description: "Path to YAML file"
+    required: true
+  yaml_key:
+    description: "YAML key (example: image.tag)"
+    required: true
+  new_value:
+    description: "New value for YAML key"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+
+    #################################################
+    # 1️⃣ Detect GitHub Host (Enterprise Safe)
+    #################################################
+    - name: Detect GitHub Host
+      id: host
+      shell: bash
+      run: |
+        HOST=$(echo "$GITHUB_SERVER_URL" | sed 's|https://||')
+        echo "host=$HOST" >> $GITHUB_OUTPUT
+        echo "Using host: $HOST"
+        echo "Using API: $GITHUB_API_URL"
+
+    #################################################
+    # 2️⃣ Install Dependencies
+    #################################################
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y jq
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+
+    #################################################
+    # 3️⃣ Generate JWT
+    #################################################
+    - name: Generate JWT
+      id: jwt
+      shell: bash
+      run: |
+        echo "${{ inputs.private_key }}" > private-key.pem
+
+        NOW=$(date +%s)
+        EXP=$((NOW + 540)) # 9 minutes
+
+        header=$(echo -n '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+        payload=$(echo -n "{\"iat\":$NOW,\"exp\":$EXP,\"iss\":${{ inputs.app_id }}}" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+        signature=$(echo -n "$header.$payload" \
+          | openssl dgst -sha256 -sign private-key.pem \
+          | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+        jwt="$header.$payload.$signature"
+
+        echo "jwt=$jwt" >> $GITHUB_OUTPUT
+
+    #################################################
+    # 4️⃣ Get Installation Token
+    #################################################
+    - name: Get Installation Token
+      id: token
+      shell: bash
+      run: |
+        response=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ steps.jwt.outputs.jwt }}" \
+          -H "Accept: application/vnd.github+json" \
+          "$GITHUB_API_URL/app/installations/${{ inputs.installation_id }}/access_tokens")
+
+        token=$(echo "$response" | jq -r .token)
+
+        if [ "$token" = "null" ] || [ -z "$token" ]; then
+          echo "Failed to get installation token"
+          echo "$response"
+          exit 1
+        fi
+
+        echo "token=$token" >> $GITHUB_OUTPUT
+
+    #################################################
+    # 5️⃣ Clone Target Repository
+    #################################################
+    - name: Clone Repository
+      shell: bash
+      run: |
+        git clone --branch "${{ inputs.branch }}" \
+          https://x-access-token:${{ steps.token.outputs.token }}@${{ steps.host.outputs.host }}/${{ inputs.repository }}.git
+
+    #################################################
+    # 6️⃣ Update YAML Key
+    #################################################
+    - name: Update YAML
+      shell: bash
+      run: |
+        cd $(basename "${{ inputs.repository }}")
+
+        if [ ! -f "${{ inputs.file_path }}" ]; then
+          echo "File not found: ${{ inputs.file_path }}"
+          exit 1
+        fi
+
+        yq -i ".${{ inputs.yaml_key }} = \"${{ inputs.new_value }}\"" "${{ inputs.file_path }}"
+
+    #################################################
+    # 7️⃣ Commit & Push
+    #################################################
+    - name: Commit & Push
+      shell: bash
+      run: |
+        cd $(basename "${{ inputs.repository }}")
+
+        git config user.name "gitops-bot"
+        git config user.email "gitops-bot@users.noreply.github.com"
+
+        git add "${{ inputs.file_path }}"
+
+        if git diff --cached --quiet; then
+          echo "No changes detected."
+          exit 0
+        fi
+
+        git commit -m "Update ${{ inputs.yaml_key }} to ${{ inputs.new_value }} via GitOps"
+
+        git push https://x-access-token:${{ steps.token.outputs.token }}@${{ steps.host.outputs.host }}/${{ inputs.repository }}.git "${{ inputs.branch }}"
