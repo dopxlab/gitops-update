@@ -52,14 +52,26 @@ runs:
     #################################################
     # 2️⃣ Install Dependencies
     #################################################
-    - name: Install dependencies
+    - name: Install dependencies (jq & yq if missing)
       shell: bash
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y jq
-        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-        sudo chmod +x /usr/local/bin/yq
+        # Install jq if not present
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "jq not found. Installing..."
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+        else
+          echo "jq already installed"
+        fi
 
+        # Install yq if not present
+        if ! command -v yq >/dev/null 2>&1; then
+          echo "yq not found. Installing..."
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+        else
+          echo "yq already installed"
+        fi
     #################################################
     # 3️⃣ Generate JWT
     #################################################
